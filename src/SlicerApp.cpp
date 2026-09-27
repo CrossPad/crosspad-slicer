@@ -551,7 +551,8 @@ void close_overlay()
     if (!s_overlay) return;
 #ifdef SLI_USE_ENCODER
     if (indev_encoderTop && s_encGroup) lv_indev_set_group(indev_encoderTop, s_encGroup);
-    if (s_overlayGroup) { lv_group_delete(s_overlayGroup); s_overlayGroup = nullptr; }
+    lv_group_delete_deferred(s_overlayGroup);     // the click that closed it is still being read
+    s_overlayGroup = nullptr;
 #endif
     lv_obj_delete_async(s_overlay);
     s_overlay = nullptr;
@@ -913,7 +914,7 @@ lv_obj_t* Slicer_create(lv_obj_t* parent, App* app)
     lv_obj_set_style_text_font(s_info, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_info, kDim, 0);
     lv_label_set_long_mode(s_info, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_info, LV_PCT(100));
+    lv_obj_set_size(s_info, LV_PCT(100), 12);     // one line: a long one ends in dots, the picture keeps its height
     lv_label_set_text(s_info, "");
 
     lv_obj_t* tools_row = make_row(s_root, 24);
