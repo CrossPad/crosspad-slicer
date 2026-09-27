@@ -15,8 +15,8 @@
  * The modes:
  *   HITS   a slice at every hit; the value is the sensitivity
  *   EQUAL  the loop in equal parts; the value is how many
- *   FREE   cut by ear: the first pad plays the loop, every next pad cuts it
- *          where it is -- the moment the pad is hit, as heard
+ *   FREE   cut by ear: a dark pad cuts the playing loop where it is -- the
+ *          moment the pad is hit, as heard; a lit pad plays from its cut
  *
  * Outside FREE the pads play their slices. The card and the audio are all
  * crosspad::ISampleTools; the recorder hands its loop over through it.
@@ -394,7 +394,7 @@ void show_info()
     } else if (s_mode == Mode::Free && s_starts.size() <= 1 && !s_chopping) {
         std::snprintf(buf, sizeof(buf), "FREE: hit a pad -- the loop plays -- then hit pads to cut it.");
     } else if (s_chopping) {
-        std::snprintf(buf, sizeof(buf), "Cutting: %u slices -- hit pads where the cuts go.", (unsigned)s_starts.size());
+        std::snprintf(buf, sizeof(buf), "Cutting: %u slices -- dark pads cut, lit pads play from their cut.", (unsigned)s_starts.size());
     } else {
         const uint32_t a = s_starts[s_sel], b = slice_end(s_sel);
         std::snprintf(buf, sizeof(buf), "Slice %d/%u   %.3f - %.3f s   (%.3f s)", s_sel + 1, (unsigned)s_starts.size(),
@@ -753,8 +753,9 @@ bool back_handler(lv_obj_t*)
 
 // ── the timer ──────────────────────────────────────────────────────────────
 
-/// Pad hits: FREE starts the loop on the first and cuts it on the others;
-/// the other modes play the pad's slice.
+/// Pad hits: in FREE a pad with a slice plays the loop from that slice's
+/// start, a dark one cuts the loop where it is heard (or starts it, when it
+/// is not playing); the other modes play the pad's slice.
 void take_hits()
 {
     auto* st = tools();
@@ -768,15 +769,19 @@ void take_hits()
             if (hit.pad < s_starts.size()) { s_sel = hit.pad; audition(hit.pad); changed = true; }
             continue;
         }
-        if (!s_chopping || !hit.playing) {
-            s_starts = {s_regA};
-            s_sel = 0;
-            s_chopping = st->preview(s_file, s_regA, s_regB, false);
+        if (hit.pad < s_starts.size() || !s_chopping || !hit.playing) {
+            const int from = hit.pad < s_starts.size() ? hit.pad : 0;
+            s_sel = from;
+            s_chopping = st->preview(s_file, s_starts.empty() ? s_regA : s_starts[from], s_regB, false);
             s_playing = false;
-        } else if (s_starts.size() < crosspad::SliceMath::kMaxSlices &&
-                   hit.frame > s_starts.back() + min_gap() && hit.frame + min_gap() < s_regB) {
-            s_starts.push_back(hit.frame);
-            s_sel = (int)s_starts.size() - 1;
+        } else if (s_starts.size() < crosspad::SliceMath::kMaxSlices) {
+            /* A cut after a lit pad restarted the loop lands between earlier
+             * ones; the slices stay in order, a pad each. */
+            const auto it = std::upper_bound(s_starts.begin(), s_starts.end(), hit.frame);
+            const uint32_t next = it == s_starts.end() ? s_regB : *it;
+            if (it != s_starts.begin() && hit.frame > *(it - 1) + min_gap() && hit.frame + min_gap() < next) {
+                s_sel = (int)(s_starts.insert(it, hit.frame) - s_starts.begin());
+            }
         }
         changed = true;
     }

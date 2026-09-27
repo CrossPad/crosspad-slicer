@@ -1,7 +1,7 @@
 {
   "name": "Slicer",
   "id": "slicer",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Chop a loop into slices -- by its hits, into equal parts, or live on the pads -- and save it as a kit",
   "category": "music",
   "icon": "slicer.png",
@@ -15,6 +15,7 @@
     "crosspad-gui": ">=1.14.0"
   },
   "changelog": [
+    "0.2.1: FREE: a lit pad plays from its cut instead of cutting again; a dark pad cuts",
     "0.2.0: FILES browses the whole card a folder at a time (paged), not only the recordings; requires core 1.27",
     "0.1.0: first version"
   ]
