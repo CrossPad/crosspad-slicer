@@ -1,0 +1,20 @@
+{
+  "name": "Slicer",
+  "id": "slicer",
+  "version": "0.1.0",
+  "description": "Chop a loop into slices -- by its hits, into equal parts, or live on the pads -- and save it as a kit",
+  "category": "music",
+  "icon": "slicer.png",
+  "component_path": "components/crosspad-slicer",
+  "platforms": [
+    "esp-idf",
+    "pc"
+  ],
+  "requires": {
+    "crosspad-core": ">=1.24.0",
+    "crosspad-gui": ">=1.14.0"
+  },
+  "changelog": [
+    "0.1.0: first version"
+  ]
+}
