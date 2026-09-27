@@ -11,7 +11,7 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=1.24.0",
+    "crosspad-core": ">=1.25.0",
     "crosspad-gui": ">=1.14.0"
   },
   "changelog": [
