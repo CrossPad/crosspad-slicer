@@ -1,7 +1,7 @@
 {
   "name": "Slicer",
   "id": "slicer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Chop a loop into slices -- by its hits, into equal parts, or live on the pads -- and save it as a kit",
   "category": "music",
   "icon": "slicer.png",
@@ -11,10 +11,11 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=1.25.0",
+    "crosspad-core": ">=1.27.0",
     "crosspad-gui": ">=1.14.0"
   },
   "changelog": [
+    "0.2.0: FILES browses the whole card a folder at a time (paged), not only the recordings; requires core 1.27",
     "0.1.0: first version"
   ]
 }

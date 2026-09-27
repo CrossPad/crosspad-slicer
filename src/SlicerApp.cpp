@@ -600,33 +600,89 @@ void overlay_item(const char* text, lv_event_cb_t cb, void* ud)
 #endif
 }
 
-std::vector<std::string> s_list;
+/* The card, a folder at a time: FILES opens the recordings, or the folder
+ * last looked in; the rows are paged, forty objects rather than a folder's
+ * worth. */
+constexpr uint32_t kPageRows = 40;
+std::string          s_browseDir;      // "" = the recordings, until a folder is opened
+crosspad::CardFolder s_folder;
+uint32_t             s_page = 0;
 
-void pick_cb(lv_event_t* e)
+void browse(const std::string& dir)
 {
-    const int i = (int)(intptr_t)lv_event_get_user_data(e);
+    auto* st = tools();
+    if (!st) return;
     close_overlay();
-    if (i >= 0 && i < (int)s_list.size()) load(s_list[i], 0, 0);
+    if (st->requestFolder(dir)) {
+        s_listPending = true;
+        set_text(s_info, "Reading the card ...");
+    } else {
+        set_text(s_info, "The card is busy -- try again.");
+    }
+}
+
+void fill_list();
+
+void entry_cb(lv_event_t* e)
+{
+    const size_t i = (size_t)(intptr_t)lv_event_get_user_data(e);
+    if (i >= s_folder.size()) return;
+    const std::string path = s_folder.path + "/" + s_folder.name(i);
+    if (s_folder.isFolder(i)) { browse(path); return; }
+    close_overlay();
+    load(path, 0, 0);
 }
 
 void fill_list()
 {
     auto* st = tools();
     if (!st) return;
-    s_list = st->recordings();
-    open_overlay(s_list.empty() ? "No takes on the card yet." : "Slice which take?");
-    for (size_t i = 0; i < s_list.size() && i < 40; ++i) overlay_item(base_of(s_list[i]).c_str(), pick_cb, (void*)(intptr_t)i);
+    const std::string root = st->cardRoot();
+    const bool atRoot = s_folder.path.size() <= root.size();
+    std::string title = atRoot ? std::string("/") : s_folder.path.substr(root.size());
+    if (title.size() > 36) title = "..." + title.substr(title.size() - 33);
+    open_overlay(title.c_str());
+    if (!atRoot) {
+        overlay_item(LV_SYMBOL_UP " ..", [](lv_event_t*) {
+            browse(s_folder.path.substr(0, s_folder.path.find_last_of('/')));
+        }, nullptr);
+    }
+    if (s_page) {
+        overlay_item(LV_SYMBOL_UP " earlier", [](lv_event_t*) {
+            s_page -= std::min(s_page, kPageRows);
+            close_overlay();
+            fill_list();
+        }, nullptr);
+    }
+    const size_t end = std::min<size_t>(s_folder.size(), (size_t)s_page + kPageRows);
+    for (size_t i = s_page; i < end; ++i) {
+        const std::string label = std::string(s_folder.isFolder(i) ? LV_SYMBOL_DIRECTORY " " : LV_SYMBOL_AUDIO " ") +
+                                  s_folder.name(i);
+        overlay_item(label.c_str(), entry_cb, (void*)(intptr_t)i);
+    }
+    if (end < s_folder.size()) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), LV_SYMBOL_DOWN " %u more", (unsigned)(s_folder.size() - end));
+        overlay_item(buf, [](lv_event_t*) {
+            s_page += kPageRows;
+            close_overlay();
+            fill_list();
+        }, nullptr);
+    }
+    auto note = [](const char* text) {
+        lv_obj_t* l = lv_label_create(s_overlay);
+        lv_obj_set_style_text_color(l, kDim, 0);
+        lv_label_set_text(l, text);
+    };
+    if (!s_folder.size()) note("No folders or WAVs here.");
+    if (s_folder.truncated) note("Only the first 2000 are listed.");
     overlay_item(LV_SYMBOL_CLOSE " Cancel", [](lv_event_t*) { close_overlay(); }, nullptr);
 }
 
 void file_cb(lv_event_t*)
 {
-    auto* st = tools();
-    if (!st || s_overlay) return;
-    if (st->requestRecordings()) {
-        s_listPending = true;
-        set_text(s_info, "Reading the card ...");
-    }
+    if (s_overlay) return;
+    browse(s_browseDir);
 }
 
 void name_done_cb(lv_event_t* e)
@@ -768,7 +824,14 @@ void tick_cb(lv_timer_t*)
         } else if (s_listPending) {
             s_listPending = false;
             show_info();
-            if (job == crosspad::ToolJob::Ready) fill_list();
+            if (job == crosspad::ToolJob::Ready) {
+                s_folder = st->folder();
+                s_browseDir = s_folder.path;
+                s_page = 0;
+                fill_list();
+            } else {
+                set_text(s_info, st->jobResult().c_str());
+            }
         } else if (s_exportPending) {
             s_exportPending = false;
             char buf[112];
