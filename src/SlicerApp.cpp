@@ -3,14 +3,17 @@
  * @brief Slicer -- a loop chopped into up to sixteen slices, one per pad,
  *        and saved as a kit.
  *
- *   top    back, the file (tap: pick a take), the MODE, its value, and PLAY
+ *   top    back, the file (tap: pick a take), the MODE, its value, PITCH
+ *          (-12..+12 semitones, varispeed: higher is faster, as on a
+ *          turntable -- PLAY, the pads and the kit all hear it), and PLAY
  *          (the whole loop, round and round)
  *   wave   the loop, the slices in turn light and dark, the selected one
  *          brightest, each numbered at its start -- the MPC's view
  *   tools  SEL picks a slice (turned; each one is heard as it is reached),
  *          MOVE moves its start (a column per detent, then a millisecond with
  *          the picture zoomed in), + splits it, DEL joins it to the one
- *          before, SAVE KIT writes the slices as a kit
+ *          before, ATK every slice's attack (turned; the selected slice is
+ *          heard with it), KIT writes the slices as a kit
  *
  * The modes:
  *   HITS   a slice at every hit; the value is the sensitivity
@@ -117,9 +120,11 @@ lv_obj_t* s_wave = nullptr;
 lv_obj_t* s_fileBtn = nullptr;
 lv_obj_t* s_modeBtn = nullptr;
 lv_obj_t* s_paramBtn = nullptr;
+lv_obj_t* s_pitchBtn = nullptr;
 lv_obj_t* s_playBtn = nullptr;
 lv_obj_t* s_selBtn = nullptr;
 lv_obj_t* s_moveBtn = nullptr;
+lv_obj_t* s_atkBtn = nullptr;
 lv_obj_t* s_info = nullptr;
 lv_obj_t* s_overlay = nullptr;
 lv_obj_t* s_nameArea = nullptr;
@@ -133,6 +138,10 @@ int      s_sel = 0;
 Mode     s_mode = Mode::Hits;
 int      s_sens = 50;
 int      s_count = 8;
+/* Every slice's attack, as the pads play it and the kit is written with. */
+constexpr uint16_t kAttacks[] = {0, 1, 2, 5, 10, 15, 20, 30, 50, 75, 100, 150, 200, 300, 500};
+int      s_atk = 0;                      // index into kAttacks
+int      s_semis = 0;                    // the loop transposed, varispeed
 crosspad::WaveOverview s_ov;             // the picture drawn: the loop, or a zoom
 std::vector<uint8_t> s_env;              // the loop's envelope, for HITS
 uint32_t s_envHop = 0, s_envStart = 0;
@@ -140,7 +149,8 @@ bool     s_loading = false;
 bool     s_ovPending = false, s_viewWanted = false;
 uint32_t s_wantA = 0, s_wantB = 0;
 bool     s_listPending = false, s_exportPending = false;
-Edit     s_editParam = Edit::None, s_editSel = Edit::None, s_editMove = Edit::None;
+Edit     s_editParam = Edit::None, s_editSel = Edit::None, s_editMove = Edit::None, s_editAtk = Edit::None;
+Edit     s_editPitch = Edit::None;
 bool     s_chopping = false;             // FREE: the loop is playing and pads cut it
 bool     s_playing = false;              // PLAY: the whole loop, looped
 int32_t  s_headX = -1;                   // playhead column as drawn, -1 = none
@@ -327,6 +337,11 @@ void show_buttons()
     set_text(lv_obj_get_child(s_selBtn, 0), buf);
     set_text(lv_obj_get_child(s_moveBtn, 0),
              s_editMove == Edit::Coarse ? "M <>" : (s_editMove == Edit::Fine ? "M fine" : "MOVE"));
+    std::snprintf(buf, sizeof(buf), "ATK %u", (unsigned)kAttacks[s_atk]);
+    set_text(lv_obj_get_child(s_atkBtn, 0), buf);
+    if (s_semis) std::snprintf(buf, sizeof(buf), "PITCH %+d", s_semis);
+    else         std::snprintf(buf, sizeof(buf), "PITCH 0");
+    set_text(lv_obj_get_child(s_pitchBtn, 0), buf);
     set_text(lv_obj_get_child(s_fileBtn, 0), s_file.empty() ? LV_SYMBOL_DIRECTORY " pick a take" : base_of(s_file).c_str());
     const bool lit = s_playing || s_chopping;
     lv_obj_set_style_bg_color(s_playBtn, lit ? kAccent : kPanel, 0);
@@ -374,13 +389,30 @@ void load(const std::string& file, uint32_t a, uint32_t b)
     show_info();
 }
 
-/// A slice heard once.
+/// The loop as PITCH plays it.
+crosspad::PreviewSound loop_sound()
+{
+    crosspad::PreviewSound s;
+    s.semitones = (int8_t)s_semis;
+    return s;
+}
+
+/// A slice as its pad in the kit will play it: PITCH and ATK.
+crosspad::PreviewSound slice_sound()
+{
+    crosspad::PreviewSound s = loop_sound();
+    s.slice = true;
+    s.attackMs = kAttacks[s_atk];
+    return s;
+}
+
+/// A slice heard once, as its pad in the kit will play it.
 void audition(int i)
 {
     auto* st = tools();
     if (!st || i < 0 || i >= (int)s_starts.size()) return;
     s_playing = false;
-    st->preview(s_file, s_starts[i], slice_end(i), false);
+    st->previewAs(s_file, s_starts[i], slice_end(i), false, slice_sound());
 }
 
 void show_info()
@@ -393,6 +425,11 @@ void show_info()
         std::snprintf(buf, sizeof(buf), "Reading %s ...", base_of(s_file).c_str());
     } else if (s_mode == Mode::Free && s_starts.size() <= 1 && !s_chopping) {
         std::snprintf(buf, sizeof(buf), "FREE: hit a pad -- the loop plays -- then hit pads to cut it.");
+    } else if (s_editPitch != Edit::None) {
+        std::snprintf(buf, sizeof(buf), "Pitch %+d st, varispeed: PLAY, the pads and KIT hear it.", s_semis);
+    } else if (s_editAtk != Edit::None) {
+        std::snprintf(buf, sizeof(buf), "Attack %u ms on every slice: the pads play it, KIT writes it.",
+                      (unsigned)kAttacks[s_atk]);
     } else if (s_chopping) {
         std::snprintf(buf, sizeof(buf), "Cutting: %u slices -- dark pads cut, lit pads play from their cut.", (unsigned)s_starts.size());
     } else {
@@ -492,6 +529,34 @@ void move_cb(lv_event_t* e)
     slices_changed();
 }
 
+/// PITCH: turned, the loop transposed; the loop is heard with it when it
+/// plays, else the selected slice.
+void pitch_cb(lv_event_t* e)
+{
+    if (edit_event(e, s_editPitch, false)) { show_buttons(); show_info(); return; }
+    const int d = turn(e);
+    if (!d || s_editPitch == Edit::None) return;
+    s_semis = std::max(-crosspad::SliceMath::kMaxSemitones, std::min(crosspad::SliceMath::kMaxSemitones, s_semis + d));
+    auto* st = tools();
+    if (st && s_playing) s_playing = st->previewAs(s_file, s_regA, s_regB, true, loop_sound());
+    else                 audition(s_sel);
+    show_buttons();
+    show_info();
+}
+
+/// ATK: turned, every slice's attack; the selected slice is heard with it.
+void atk_cb(lv_event_t* e)
+{
+    if (edit_event(e, s_editAtk, false)) { show_buttons(); show_info(); return; }
+    const int d = turn(e);
+    if (!d || s_editAtk == Edit::None) return;
+    const int n = (int)(sizeof(kAttacks) / sizeof(kAttacks[0]));
+    s_atk = std::max(0, std::min(n - 1, s_atk + d));
+    audition(s_sel);
+    show_buttons();
+    show_info();
+}
+
 // ── actions ────────────────────────────────────────────────────────────────
 
 void back_cb(lv_event_t* e)
@@ -513,7 +578,7 @@ void play_cb(lv_event_t*)
     auto* st = tools();
     if (!st || s_file.empty()) return;
     if (s_playing || s_chopping) { st->stopPreview(); s_playing = s_chopping = false; }
-    else s_playing = st->preview(s_file, s_regA, s_regB, true);
+    else s_playing = st->previewAs(s_file, s_regA, s_regB, true, loop_sound());
     show_buttons();
 }
 
@@ -697,6 +762,8 @@ void name_done_cb(lv_event_t* e)
     kit.name = name;
     kit.starts = s_starts;
     kit.end = s_regB;
+    kit.attackMs = kAttacks[s_atk];
+    kit.semitones = (int8_t)s_semis;
     if (st->requestExportKit(kit)) {
         s_exportPending = true;
         set_text(s_info, "Writing the kit ...");
@@ -705,7 +772,7 @@ void name_done_cb(lv_event_t* e)
     }
 }
 
-/// SAVE KIT asks for a name, the take's own by default.
+/// KIT asks for a name, the take's own by default.
 void save_cb(lv_event_t*)
 {
     if (s_file.empty() || s_starts.empty() || s_overlay) return;
@@ -739,13 +806,15 @@ void save_cb(lv_event_t*)
 bool back_handler(lv_obj_t*)
 {
     if (s_overlay) { close_overlay(); return true; }
-    if (s_editParam != Edit::None || s_editSel != Edit::None || s_editMove != Edit::None) {
+    if (s_editParam != Edit::None || s_editSel != Edit::None || s_editMove != Edit::None ||
+        s_editAtk != Edit::None || s_editPitch != Edit::None) {
 #ifdef SLI_USE_ENCODER
         if (s_encGroup) lv_group_set_editing(s_encGroup, false);
 #endif
         if (s_editMove == Edit::Fine) request_view(s_regA, s_regB);
-        s_editParam = s_editSel = s_editMove = Edit::None;
+        s_editParam = s_editSel = s_editMove = s_editAtk = s_editPitch = Edit::None;
         show_buttons();
+        show_info();
         return true;
     }
     return false;
@@ -772,7 +841,8 @@ void take_hits()
         if (hit.pad < s_starts.size() || !s_chopping || !hit.playing) {
             const int from = hit.pad < s_starts.size() ? hit.pad : 0;
             s_sel = from;
-            s_chopping = st->preview(s_file, s_starts.empty() ? s_regA : s_starts[from], s_regB, false);
+            s_chopping = st->previewAs(s_file, s_starts.empty() ? s_regA : s_starts[from], s_regB, false,
+                                       loop_sound());
             s_playing = false;
         } else if (s_starts.size() < crosspad::SliceMath::kMaxSlices) {
             /* A cut after a lit pad restarted the loop lands between earlier
@@ -873,6 +943,10 @@ void style_button(lv_obj_t* b, int32_t w, int32_t h)
     lv_obj_set_style_shadow_width(b, 0, 0);
     lv_obj_set_style_bg_color(b, kPanel, 0);
     lv_obj_set_style_bg_color(b, kAccent, LV_STATE_EDITED);
+    /* On the button, not the label: only the button is ever EDITED, and the
+     * label takes the colour from it -- dark on the accent while turned. */
+    lv_obj_set_style_text_color(b, kText, 0);
+    lv_obj_set_style_text_color(b, kInk, LV_STATE_EDITED);
     lv_obj_set_style_outline_color(b, kMark, LV_STATE_FOCUS_KEY);
     lv_obj_set_style_outline_width(b, 2, LV_STATE_FOCUS_KEY);
 }
@@ -881,8 +955,6 @@ lv_obj_t* add_label(lv_obj_t* b, const char* text)
 {
     lv_obj_t* l = lv_label_create(b);
     lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(l, kText, 0);
-    lv_obj_set_style_text_color(l, kInk, LV_STATE_EDITED);
     lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
     lv_obj_set_style_max_width(l, LV_PCT(100), 0);
     lv_label_set_text(l, text);
@@ -958,14 +1030,15 @@ lv_obj_t* Slicer_create(lv_obj_t* parent, App* app)
     lv_obj_remove_flag(s_root, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* top = make_row(s_root, 22);
-    make_button(top, 30, LV_SYMBOL_LEFT, back_cb, app);
-    s_fileBtn = make_button(top, 100, "", file_cb);
+    make_button(top, 28, LV_SYMBOL_LEFT, back_cb, app);
+    s_fileBtn = make_button(top, 66, "", file_cb);
     s_modeBtn = make_button(top, 44, "HITS", mode_cb);
-    s_paramBtn = make_editable(top, 60, "SENS 50", param_cb);
+    s_paramBtn = make_editable(top, 54, "SENS 50", param_cb);
+    s_pitchBtn = make_editable(top, 60, "PITCH 0", pitch_cb);
     lv_obj_t* gap = lv_obj_create(top);
     lv_obj_remove_style_all(gap);
     lv_obj_set_flex_grow(gap, 1);
-    s_playBtn = make_button(top, 40, LV_SYMBOL_PLAY, play_cb);
+    s_playBtn = make_button(top, 36, LV_SYMBOL_PLAY, play_cb);
 
     s_wave = lv_obj_create(s_root);
     lv_obj_remove_style_all(s_wave);
@@ -986,14 +1059,15 @@ lv_obj_t* Slicer_create(lv_obj_t* parent, App* app)
     lv_label_set_text(s_info, "");
 
     lv_obj_t* tools_row = make_row(s_root, 24);
-    s_selBtn = make_editable(tools_row, 52, "SEL 1", sel_cb);
-    s_moveBtn = make_editable(tools_row, 52, "MOVE", move_cb);
-    make_button(tools_row, 34, LV_SYMBOL_PLUS, add_cb);
-    make_button(tools_row, 40, "DEL", del_cb);
+    s_selBtn = make_editable(tools_row, 50, "SEL 1", sel_cb);
+    s_moveBtn = make_editable(tools_row, 50, "MOVE", move_cb);
+    make_button(tools_row, 30, LV_SYMBOL_PLUS, add_cb);
+    make_button(tools_row, 36, "DEL", del_cb);
+    s_atkBtn = make_editable(tools_row, 54, "ATK 0", atk_cb);
     lv_obj_t* gap2 = lv_obj_create(tools_row);
     lv_obj_remove_style_all(gap2);
     lv_obj_set_flex_grow(gap2, 1);
-    make_button(tools_row, 76, LV_SYMBOL_SAVE " SAVE KIT", save_cb);
+    make_button(tools_row, 50, LV_SYMBOL_SAVE " KIT", save_cb);
 
     s_hitTail.store(s_hitHead.load());
     std::string file;
@@ -1042,9 +1116,10 @@ void Slicer_destroy(lv_obj_t* root)
     if (s_overlayGroup) { lv_group_delete(s_overlayGroup); s_overlayGroup = nullptr; }
 #endif
     s_overlay = s_nameArea = nullptr;
-    s_root = s_wave = s_fileBtn = s_modeBtn = s_paramBtn = s_playBtn = s_selBtn = s_moveBtn = s_info = nullptr;
+    s_root = s_wave = s_fileBtn = s_modeBtn = s_paramBtn = s_pitchBtn = s_playBtn = s_selBtn = s_moveBtn = s_atkBtn =
+        s_info = nullptr;
     s_playing = s_chopping = s_ovPending = s_viewWanted = s_listPending = s_exportPending = false;
-    s_editParam = s_editSel = s_editMove = Edit::None;
+    s_editParam = s_editSel = s_editMove = s_editAtk = s_editPitch = Edit::None;
     s_headX = -1;
 
 #ifdef SLI_USE_ENCODER
