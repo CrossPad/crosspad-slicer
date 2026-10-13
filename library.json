@@ -1,6 +1,6 @@
 {
     "name": "crosspad-slicer",
-    "version": "0.3.1",
+    "version": "0.3.2",
     "license": "GPL-3.0-or-later",
     "description": "Chop a loop into slices -- by its hits, into equal parts, or live on the pads -- and save it as a kit",
     "keywords": [
@@ -10,8 +10,8 @@
         "sample"
     ],
     "dependencies": {
-        "crosspad-core": "*",
-        "crosspad-gui": "*"
+        "crosspad-core": "^2.0.0",
+        "crosspad-gui": "^2.0.0"
     },
     "build": {
         "appLibrary": true
