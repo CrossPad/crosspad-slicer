@@ -1130,7 +1130,7 @@ void Slicer_destroy(lv_obj_t* root)
     }
     s_prevEncGroup = nullptr;
 #endif
-    lv_obj_delete_async(root);
+    if (root) lv_obj_delete_async(root);
 }
 
 // The pads are the Slicer's while it is open: each plays its slice, and in

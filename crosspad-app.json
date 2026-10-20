@@ -1,7 +1,7 @@
 {
   "name": "Slicer",
   "id": "slicer",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Chop a loop into slices -- by its hits, into equal parts, or live on the pads -- and save it as a kit",
   "category": "music",
   "icon": "slicer.png",
@@ -11,10 +11,11 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=1.31.0",
-    "crosspad-gui": ">=1.14.0"
+    "crosspad-core": ">=1.70.0,<3.0.0",
+    "crosspad-gui": ">=1.28.0,<3.0.0"
   },
   "changelog": [
+    "0.3.2: a root deleted before the app's teardown is handled (gui 2.0 calls destroy with none); builds on core 1.70+/gui 1.28+ and on core/gui 2.x (>=1.70.0,<3.0.0 and >=1.28.0,<3.0.0) for the merge window",
     "0.3.1: license is now GPL-3.0-or-later; no code changes",
     "0.3.0: ATK -- every slice's attack, 0 to 500 ms; PITCH -- the loop transposed -12..+12 semitones, varispeed (higher is faster); PLAY, the pads, FREE and KIT all hear both, and the kit is written with them (SliceMath::sliceGain / readPitched, the same code both ways); SAVE KIT is KIT; requires core 1.31; a value being turned reads dark on the accent: the text colour sits on the button, which is the only thing ever EDITED, not on its label",
     "0.2.1: FREE: a lit pad plays from its cut instead of cutting again; a dark pad cuts",
