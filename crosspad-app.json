@@ -1,7 +1,7 @@
 {
   "name": "Slicer",
   "id": "slicer",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Chop a loop into slices -- by its hits, into equal parts, or live on the pads -- and save it as a kit",
   "category": "music",
   "icon": "slicer.png",
@@ -15,6 +15,7 @@
     "crosspad-gui": ">=1.28.0,<3.0.0"
   },
   "changelog": [
+    "0.4.0: KIT writes a Slice kit -- the loop as one WAV (SAMPLES/loop.wav) and each pad a region of it, played with one voice; PITCH is the kit's and ATK each pad's, both played in real time instead of written into 16 files. Listed under SLICE in Kits. Needs the firmware's core 2.5 export (SampleToolsPort).",
     "0.3.2: a root deleted before the app's teardown is handled (gui 2.0 calls destroy with none); builds on core 1.70+/gui 1.28+ and on core/gui 2.x (>=1.70.0,<3.0.0 and >=1.28.0,<3.0.0) for the merge window",
     "0.3.1: license is now GPL-3.0-or-later; no code changes",
     "0.3.0: ATK -- every slice's attack, 0 to 500 ms; PITCH -- the loop transposed -12..+12 semitones, varispeed (higher is faster); PLAY, the pads, FREE and KIT all hear both, and the kit is written with them (SliceMath::sliceGain / readPitched, the same code both ways); SAVE KIT is KIT; requires core 1.31; a value being turned reads dark on the accent: the text colour sits on the button, which is the only thing ever EDITED, not on its label",

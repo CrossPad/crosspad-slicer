@@ -13,7 +13,8 @@
  *          MOVE moves its start (a column per detent, then a millisecond with
  *          the picture zoomed in), + splits it, DEL joins it to the one
  *          before, ATK every slice's attack (turned; the selected slice is
- *          heard with it), KIT writes the slices as a kit
+ *          heard with it), KIT writes the slices as a Slice kit: the loop as
+ *          one WAV and each pad a region of it, played with one voice
  *
  * The modes:
  *   HITS   a slice at every hit; the value is the sensitivity
@@ -910,7 +911,7 @@ void tick_cb(lv_timer_t*)
         } else if (s_exportPending) {
             s_exportPending = false;
             char buf[112];
-            std::snprintf(buf, sizeof(buf), job == crosspad::ToolJob::Ready ? "Saved the kit %s -- it is in Kits now."
+            std::snprintf(buf, sizeof(buf), job == crosspad::ToolJob::Ready ? "Saved the Slice kit %s -- Kits, SLICE."
                                                                             : "Not saved: %s",
                           st->jobResult().c_str());
             set_text(s_info, buf);
