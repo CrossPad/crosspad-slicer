@@ -1,7 +1,7 @@
 {
   "name": "Slicer",
   "id": "slicer",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Chop a loop into slices -- by its hits, into equal parts, or live on the pads -- and save it as a kit",
   "category": "music",
   "icon": "slicer.png",
@@ -11,10 +11,11 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=1.70.0,<3.0.0",
+    "crosspad-core": ">=2.44.0,<3.0.0",
     "crosspad-gui": ">=1.28.0,<3.0.0"
   },
   "changelog": [
+    "0.5.0: FX beside ATK -- PITCH with the length kept, LOW and HIGH PASS, LISTEN (the loop round through them) and APPLY: a copy of the sliced file rendered with them, beside it, which the Slicer then works on with every cut where it was and PITCH and ATK as they were, so KIT writes the processed loop; NORMALIZE brings the copy up to -0.3 dB after the rest (<name>_norm.wav, as NORM does). APPLY and KIT show the Sampler's PROCESSING box on the picture while the card works (PROCESSING / NORMALIZING / SAVING KIT, the percentage, what is being made, a thin bar), as its pad editor does. SNAP (on by default) moves every cut onto the zero crossing before it -- the cuts of HITS and EQUAL, +, a FREE cut and MOVE once let go -- so a slice no longer starts mid-wave and clicks, and the hit keeps its attack. KIT asks first -- the Sampler's dialog: User kit (PERF, a kit of one's own: every slice cut into its own WAV with PITCH and ATK written in, 01.wav..) or Slice kit (SLICE, as before) -- then the name. FREE plays from a cut with ATK, as the pad in the kit does, instead of at full level at once. Requires core 2.44 (ISampleTools::requestSnapped) (ISampleTools::requestRendered).",
     "0.4.0: KIT writes a Slice kit -- the loop as one WAV (SAMPLES/loop.wav) and each pad a region of it, played with one voice; PITCH is the kit's and ATK each pad's, both played in real time instead of written into 16 files. Listed under SLICE in Kits. Needs the firmware's core 2.5 export (SampleToolsPort).",
     "0.3.2: a root deleted before the app's teardown is handled (gui 2.0 calls destroy with none); builds on core 1.70+/gui 1.28+ and on core/gui 2.x (>=1.70.0,<3.0.0 and >=1.28.0,<3.0.0) for the merge window",
     "0.3.1: license is now GPL-3.0-or-later; no code changes",

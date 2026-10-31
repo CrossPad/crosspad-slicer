@@ -13,14 +13,27 @@
  *          MOVE moves its start (a column per detent, then a millisecond with
  *          the picture zoomed in), + splits it, DEL joins it to the one
  *          before, ATK every slice's attack (turned; the selected slice is
- *          heard with it), KIT writes the slices as a Slice kit: the loop as
- *          one WAV and each pad a region of it, played with one voice
+ *          heard with it), SNAP (on by default) every cut onto the zero
+ *          crossing before it, so no slice starts mid-wave and clicks -- the
+ *          cuts any mode makes, +, a FREE cut and MOVE once let go --, FX the
+ *          effects window, KIT asks User kit or Slice kit, then the name:
+ *          a User kit is a PERF kit of the user's own, every slice its own
+ *          WAV with PITCH and ATK in it; a Slice kit is the loop as one
+ *          WAV and each pad a region of it, played with one voice
+ *   FX     PITCH with the length kept, LOW and HIGH PASS, NORMALIZE (the
+ *          loudest sample to -0.3 dB, after the rest), LISTEN, APPLY: a copy
+ *          of the sliced file rendered with them, beside it, which the
+ *          Slicer then works on -- every cut where it was, PITCH and ATK as
+ *          they were, so the effects are on the slices and on the kit
+ *   busy   APPLY and KIT show the Sampler's PROCESSING box on the picture
+ *          while the card works -- what runs, how far, a thin bar
  *
  * The modes:
  *   HITS   a slice at every hit; the value is the sensitivity
  *   EQUAL  the loop in equal parts; the value is how many
  *   FREE   cut by ear: a dark pad cuts the playing loop where it is -- the
- *          moment the pad is hit, as heard; a lit pad plays from its cut
+ *          moment the pad is hit, as heard; a lit pad plays from its cut,
+ *          rising over ATK as its pad in the kit does
  *
  * Outside FREE the pads play their slices. The card and the audio are all
  * crosspad::ISampleTools; the recorder hands its loop over through it.
@@ -40,7 +53,9 @@
 #include "crosspad/pad/PadManager.hpp"
 #include "crosspad/platform/PlatformServices.hpp"
 #include "crosspad/sampletools/ISampleTools.hpp"
+#include "crosspad/sampletools/SampleFx.hpp"
 #include "crosspad/sampletools/SliceMath.hpp"
+#include "crosspad-gui/components/ui_modal.h"
 #include "crosspad-gui/widgets/gui_helpers.h"
 
 #include "lvgl.h"
@@ -68,6 +83,7 @@ constexpr uint16_t kCols       = 300;
 constexpr uint32_t kTickMs     = 40;
 constexpr uint32_t kZoomFrames = 12000;
 constexpr int      kPads       = 16;
+constexpr float    kNormPeak   = 0.966f;  // NORMALIZE's loudest sample: -0.3 dB, as the Sampler's NORM
 
 const lv_color_t kBg     = lv_color_hex(0x16181B);
 const lv_color_t kPanel  = lv_color_hex(0x20242A);
@@ -126,6 +142,7 @@ lv_obj_t* s_playBtn = nullptr;
 lv_obj_t* s_selBtn = nullptr;
 lv_obj_t* s_moveBtn = nullptr;
 lv_obj_t* s_atkBtn = nullptr;
+lv_obj_t* s_snapBtn = nullptr;
 lv_obj_t* s_info = nullptr;
 lv_obj_t* s_overlay = nullptr;
 lv_obj_t* s_nameArea = nullptr;
@@ -150,8 +167,31 @@ bool     s_loading = false;
 bool     s_ovPending = false, s_viewWanted = false;
 uint32_t s_wantA = 0, s_wantB = 0;
 bool     s_listPending = false, s_exportPending = false;
+bool     s_savePerf = false;                 // KIT: a User kit in PERF, not a Slice kit
+lv_obj_t* s_kindDialog = nullptr;            // KIT's question, while it is up
 Edit     s_editParam = Edit::None, s_editSel = Edit::None, s_editMove = Edit::None, s_editAtk = Edit::None;
 Edit     s_editPitch = Edit::None;
+/* FX: what APPLY renders the file with -- a pitch with the length kept (the
+ * cuts stay on the same sound) and the filters -- and its window. */
+crosspad::SampleFx s_fx;
+int      s_fxLp = crosspad::kFxCutoffCount, s_fxHp = -1;   // cutoff steps; past either end is off
+Edit     s_editFxPitch = Edit::None, s_editFxLp = Edit::None, s_editFxHp = Edit::None;
+bool     s_fxNorm = false;               // NORMALIZE: brought up after the rest
+bool     s_fxPending = false;
+bool     s_fxNormNext = false;           // the render is running; the normalize follows it
+std::string s_fxNormFrom;                // what the normalize was asked of
+lv_obj_t* s_fxPitchBtn = nullptr;
+lv_obj_t* s_fxLpBtn = nullptr;
+lv_obj_t* s_fxHpBtn = nullptr;
+lv_obj_t* s_fxNormBtn = nullptr;
+lv_obj_t* s_fxInfo = nullptr;
+/* SNAP: every cut on the zero crossing before it (ISampleTools::
+ * requestSnapped), so a slice never starts mid-wave and clicks. Asked after
+ * each change of the cuts -- MOVE once it is let go -- and taken only if the
+ * cuts are still the ones asked about. */
+bool     s_snap = true;
+bool     s_snapWanted = false, s_snapPending = false;
+std::vector<uint32_t> s_snapAsked;
 bool     s_chopping = false;             // FREE: the loop is playing and pads cut it
 bool     s_playing = false;              // PLAY: the whole loop, looped
 int32_t  s_headX = -1;                   // playhead column as drawn, -1 = none
@@ -347,9 +387,14 @@ void show_buttons()
     const bool lit = s_playing || s_chopping;
     lv_obj_set_style_bg_color(s_playBtn, lit ? kAccent : kPanel, 0);
     lv_obj_set_style_text_color(lv_obj_get_child(s_playBtn, 0), lit ? kInk : kText, 0);
+    if (s_snapBtn) {
+        lv_obj_set_style_bg_color(s_snapBtn, s_snap ? kAccent : kPanel, 0);
+        lv_obj_set_style_text_color(s_snapBtn, s_snap ? kInk : kText, 0);
+    }
 }
 
-void slices_changed()
+/// The cuts on screen and on the pads, as they are.
+void show_slices()
 {
     if (s_starts.empty()) s_starts.push_back(s_regA);
     s_sel = std::max(0, std::min(s_sel, (int)s_starts.size() - 1));
@@ -357,6 +402,23 @@ void slices_changed()
     show_buttons();
     show_info();
     if (s_wave) lv_obj_invalidate(s_wave);
+}
+
+/// The cuts changed: shown, and snapped once the tools are free.
+void slices_changed()
+{
+    show_slices();
+    if (s_snap && s_editMove == Edit::None) s_snapWanted = true;
+}
+
+/// SNAP's answer: the cuts moved onto their crossings. The first one may
+/// move before the loop's start, which then follows it.
+void snap_done(const std::vector<uint32_t>& snapped)
+{
+    if (snapped.size() != s_starts.size() || snapped == s_starts) return;
+    s_starts = snapped;
+    if (!s_starts.empty() && s_starts[0] < s_regA) s_regA = s_starts[0];
+    show_slices();
 }
 
 /// The mode's own slices, from what is known of the loop.
@@ -507,6 +569,7 @@ void move_cb(lv_event_t* e)
         } else if (was == Edit::Fine && s_editMove != Edit::Fine) {
             request_view(s_regA, s_regB);
         }
+        if (s_editMove == Edit::None && was != Edit::None) slices_changed();   // let go: SNAP
         show_buttons();
         return;
     }
@@ -623,6 +686,8 @@ void close_overlay()
     lv_obj_delete_async(s_overlay);
     s_overlay = nullptr;
     s_nameArea = nullptr;
+    s_fxPitchBtn = s_fxLpBtn = s_fxHpBtn = s_fxNormBtn = s_fxInfo = nullptr;
+    s_editFxPitch = s_editFxLp = s_editFxHp = Edit::None;
 }
 
 void open_overlay(const char* title)
@@ -751,6 +816,83 @@ void file_cb(lv_event_t*)
     browse(s_browseDir);
 }
 
+// ── the busy box: APPLY and KIT ────────────────────────────────────────────
+
+/* The Sampler's (its pad editor's PROCESSING), on the picture, where it is
+ * looked at: what runs and how far, one line and a thin bar under it. The
+ * dots move, so a wait for the card still reads as alive. It goes when the
+ * job ends; the info line says what came of it. */
+lv_obj_t*   s_busy = nullptr;
+lv_obj_t*   s_busyText = nullptr;
+lv_obj_t*   s_busyBar = nullptr;
+bool        s_busyOn = false;
+const char* s_busyTitle = "";            // PROCESSING, NORMALIZING, SAVING KIT
+std::string s_busyWhat;                  // what is being made
+
+bool busy_working() { return s_busyOn; }
+
+void busy_progress(unsigned pct)
+{
+    if (!s_busy || !s_busyOn) return;
+    if (pct > 100) pct = 100;
+    static const char* const kDots[] = {".  ", ".. ", "...", "   "};
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "%s %u%%%s", s_busyTitle, pct, kDots[(lv_tick_get() / 300) % 4]);
+    std::string text = buf;
+    if (!s_busyWhat.empty()) text += "  " + s_busyWhat;
+    set_text(s_busyText, text.c_str());
+    lv_bar_set_value(s_busyBar, (int32_t)pct, LV_ANIM_OFF);
+    if (lv_obj_has_flag(s_busy, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(s_busy, LV_OBJ_FLAG_HIDDEN);
+}
+
+void busy_open(const char* title, const std::string& what)
+{
+    s_busyOn = true;
+    s_busyTitle = title;
+    s_busyWhat = what;
+    busy_progress(0);
+}
+
+void busy_end()
+{
+    s_busyOn = false;
+    if (s_busy && !lv_obj_has_flag(s_busy, LV_OBJ_FLAG_HIDDEN)) lv_obj_add_flag(s_busy, LV_OBJ_FLAG_HIDDEN);
+}
+
+void busy_build()
+{
+    s_busy = lv_obj_create(s_wave);
+    lv_obj_remove_style_all(s_busy);
+    lv_obj_set_size(s_busy, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_align(s_busy, LV_ALIGN_TOP_MID, 0, 2);
+    lv_obj_set_style_bg_color(s_busy, kBg, 0);
+    lv_obj_set_style_bg_opa(s_busy, LV_OPA_90, 0);
+    lv_obj_set_style_radius(s_busy, 4, 0);
+    lv_obj_set_style_border_color(s_busy, kAccent, 0);
+    lv_obj_set_style_border_width(s_busy, 1, 0);
+    lv_obj_set_style_pad_hor(s_busy, 6, 0);
+    lv_obj_set_style_pad_ver(s_busy, 3, 0);
+    lv_obj_set_style_pad_row(s_busy, 2, 0);
+    lv_obj_set_flex_flow(s_busy, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_busy, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(s_busy, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(s_busy, LV_OBJ_FLAG_CLICKABLE);
+    s_busyText = lv_label_create(s_busy);
+    lv_obj_set_style_text_font(s_busyText, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_busyText, kAccent, 0);
+    lv_label_set_text(s_busyText, "");
+    s_busyBar = lv_bar_create(s_busy);
+    lv_obj_set_size(s_busyBar, LV_PCT(100), 3);
+    lv_bar_set_range(s_busyBar, 0, 100);
+    lv_obj_set_style_bg_color(s_busyBar, kDim, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_busyBar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_busyBar, kAccent, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(s_busyBar, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_busyBar, 2, LV_PART_INDICATOR);
+    lv_obj_set_style_anim_duration(s_busyBar, 0, 0);
+    lv_obj_add_flag(s_busy, LV_OBJ_FLAG_HIDDEN);
+}
+
 void name_done_cb(lv_event_t* e)
 {
     const bool ok = lv_event_get_code(e) == LV_EVENT_READY;
@@ -765,23 +907,24 @@ void name_done_cb(lv_event_t* e)
     kit.end = s_regB;
     kit.attackMs = kAttacks[s_atk];
     kit.semitones = (int8_t)s_semis;
+    kit.perf = s_savePerf;
     if (st->requestExportKit(kit)) {
         s_exportPending = true;
-        set_text(s_info, "Writing the kit ...");
+        set_text(s_info, "");
+        busy_open("SAVING KIT", name);
     } else {
         set_text(s_info, "Not saved: that name cannot be a folder, or the card is busy.");
     }
 }
 
-/// KIT asks for a name, the take's own by default.
-void save_cb(lv_event_t*)
+/// The name, the take's own by default, for the kind KIT's question chose.
+void ask_name()
 {
-    if (s_file.empty() || s_starts.empty() || s_overlay) return;
-    if (auto* st = tools()) { st->stopPreview(); s_playing = s_chopping = false; }
+    if (!s_root || s_file.empty() || s_starts.empty() || s_overlay || busy_working()) return;
     std::string name = base_of(s_file);
     if (name.size() > 4) name.resize(name.size() - 4);
     for (auto& c : name) c = (char)toupper((unsigned char)c);
-    open_overlay("Kit name");
+    open_overlay(s_savePerf ? "User kit name (PERF)" : "Slice kit name (SLICE)");
     lv_obj_set_style_pad_row(s_overlay, 2, 0);
     s_nameArea = lv_textarea_create(s_overlay);
     lv_textarea_set_one_line(s_nameArea, true);
@@ -804,6 +947,240 @@ void save_cb(lv_event_t*)
     show_buttons();
 }
 
+void kind_chosen(int index, void*)
+{
+    s_kindDialog = nullptr;
+    if (index != 0 && index != 1) return;
+    s_savePerf = index == 0;
+    /* Not from inside the dialog's callback: it gives the encoder back to
+     * the screen after this returns, which would take it from the name. */
+    lv_async_call([](void*) { ask_name(); }, nullptr);
+}
+
+/// KIT asks what to save first -- the Sampler's dialog -- then the name.
+void save_cb(lv_event_t*)
+{
+    if (s_file.empty() || s_starts.empty() || s_overlay || s_kindDialog || busy_working()) return;
+    if (auto* st = tools()) { st->stopPreview(); s_playing = s_chopping = false; }
+    show_buttons();
+    static const ui_modal_button_t kKinds[] = {
+        {"User kit", UI_MODAL_BUTTON_PRIMARY},
+        {"Slice kit", UI_MODAL_BUTTON_NORMAL},
+        {"Cancel", UI_MODAL_BUTTON_NORMAL},
+    };
+    lv_group_t* back = nullptr;
+#ifdef SLI_USE_ENCODER
+    back = s_encGroup;
+#endif
+    s_kindDialog = ui_modal_choice("Save the slices",
+                                   "User kit: in PERF, every slice cut into its own WAV, as a kit.\n"
+                                   "Slice kit: in SLICE, the loop once, a region a pad.",
+                                   kKinds, 3, 0, kind_chosen, nullptr, back);
+}
+
+// ── FX ─────────────────────────────────────────────────────────────────────
+
+void fx_reset()
+{
+    s_fx = crosspad::SampleFx{};
+    s_fxLp = crosspad::kFxCutoffCount;
+    s_fxHp = -1;
+    s_fxNorm = false;
+}
+
+/// Where APPLY writes @p path's copy: beside it, what was set in its name --
+/// "<name>_p+3k_h125_l8000.wav", as the Recorder's FX names its copies.
+std::string fx_path(const std::string& path, const crosspad::SampleFx& fx)
+{
+    const size_t dot = path.rfind('.');
+    const size_t slash = path.rfind('/');
+    std::string out = dot != std::string::npos && (slash == std::string::npos || dot > slash) ? path.substr(0, dot) : path;
+    char buf[16];
+    if (fx.semitones) { std::snprintf(buf, sizeof(buf), "_p%+dk", fx.semitones); out += buf; }
+    if (fx.hpHz) { std::snprintf(buf, sizeof(buf), "_h%u", (unsigned)fx.hpHz); out += buf; }
+    if (fx.lpHz) { std::snprintf(buf, sizeof(buf), "_l%u", (unsigned)fx.lpHz); out += buf; }
+    return out + ".wav";
+}
+
+/// Where NORMALIZE writes @p path's copy: beside it, "<name>_norm.wav", as the
+/// Recorder's and the Sampler's NORM do.
+std::string norm_path(const std::string& path)
+{
+    const size_t dot = path.rfind('.');
+    const size_t slash = path.rfind('/');
+    const std::string stem = dot != std::string::npos && (slash == std::string::npos || dot > slash)
+                                 ? path.substr(0, dot) : path;
+    return stem + "_norm.wav";
+}
+
+void cutoff_text(char* buf, size_t n, const char* name, uint16_t hz)
+{
+    if (!hz)            std::snprintf(buf, n, "%s off", name);
+    else if (hz < 1000) std::snprintf(buf, n, "%s %u Hz", name, (unsigned)hz);
+    else                std::snprintf(buf, n, "%s %.1f kHz", name, (double)hz / 1000.0);
+}
+
+void show_fx()
+{
+    if (!s_fxPitchBtn) return;
+    char buf[32];
+    if (s_fx.semitones) std::snprintf(buf, sizeof(buf), "PITCH %+d st", s_fx.semitones);
+    else                std::snprintf(buf, sizeof(buf), "PITCH 0");
+    set_text(lv_obj_get_child(s_fxPitchBtn, 0), buf);
+    cutoff_text(buf, sizeof(buf), "LOW PASS", s_fx.lpHz);
+    set_text(lv_obj_get_child(s_fxLpBtn, 0), buf);
+    cutoff_text(buf, sizeof(buf), "HIGH PASS", s_fx.hpHz);
+    set_text(lv_obj_get_child(s_fxHpBtn, 0), buf);
+    set_text(lv_obj_get_child(s_fxNormBtn, 0), s_fxNorm ? "NORMALIZE -0.3 dB" : "NORMALIZE off");
+    lv_obj_set_style_bg_color(s_fxNormBtn, s_fxNorm ? kAccent : kPanel, 0);
+    lv_obj_set_style_text_color(s_fxNormBtn, s_fxNorm ? kInk : kText, 0);
+}
+
+/// What APPLY makes, for the busy screen: "PITCH +3  LP 8.0 kHz  NORMALIZE".
+std::string fx_summary()
+{
+    std::string out;
+    char buf[32];
+    auto add = [&](const char* t) { if (!out.empty()) out += "  "; out += t; };
+    if (s_fx.semitones) { std::snprintf(buf, sizeof(buf), "PITCH %+d", s_fx.semitones); add(buf); }
+    if (s_fx.hpHz) { cutoff_text(buf, sizeof(buf), "HP", s_fx.hpHz); add(buf); }
+    if (s_fx.lpHz) { cutoff_text(buf, sizeof(buf), "LP", s_fx.lpHz); add(buf); }
+    if (s_fxNorm) add("NORMALIZE");
+    return out;
+}
+
+void fx_pitch_cb(lv_event_t* e)
+{
+    if (edit_event(e, s_editFxPitch, false)) return;
+    const int d = turn(e);
+    if (!d || s_editFxPitch == Edit::None) return;
+    s_fx.semitones = std::max(-crosspad::SliceMath::kMaxSemitones,
+                              std::min(crosspad::SliceMath::kMaxSemitones, s_fx.semitones + d));
+    show_fx();
+}
+
+void fx_lp_cb(lv_event_t* e)
+{
+    if (edit_event(e, s_editFxLp, false)) return;
+    const int d = turn(e);
+    if (!d || s_editFxLp == Edit::None) return;
+    s_fxLp = std::max(0, std::min(crosspad::kFxCutoffCount, s_fxLp + d));
+    s_fx.lpHz = s_fxLp < crosspad::kFxCutoffCount ? crosspad::kFxCutoffs[s_fxLp] : 0;
+    show_fx();
+}
+
+void fx_hp_cb(lv_event_t* e)
+{
+    if (edit_event(e, s_editFxHp, false)) return;
+    const int d = turn(e);
+    if (!d || s_editFxHp == Edit::None) return;
+    s_fxHp = std::max(-1, std::min(crosspad::kFxCutoffCount - 1, s_fxHp + d));
+    s_fx.hpHz = s_fxHp >= 0 ? crosspad::kFxCutoffs[s_fxHp] : 0;
+    show_fx();
+}
+
+void fx_norm_cb(lv_event_t*)
+{
+    s_fxNorm = !s_fxNorm;
+    show_fx();
+}
+
+/// The loop round, through the filters and with the pitch on top of PITCH's
+/// -- as varispeed: the audition cannot keep the length, APPLY does.
+void fx_listen_cb(lv_event_t*)
+{
+    auto* st = tools();
+    if (!st || s_file.empty()) return;
+    crosspad::PreviewSound snd = loop_sound();
+    snd.semitones = (int8_t)std::max(-crosspad::SliceMath::kMaxSemitones,
+                                     std::min(crosspad::SliceMath::kMaxSemitones, s_semis + s_fx.semitones));
+    snd.hpHz = s_fx.hpHz;
+    snd.lpHz = s_fx.lpHz;
+    s_chopping = false;
+    s_playing = st->previewAs(s_file, s_regA, s_regB, true, snd);
+    set_text(s_fxInfo, !s_playing ? "Cannot play now."
+                                  : (s_fx.semitones ? "Playing -- the pitch as varispeed; APPLY keeps the length."
+                                                    : "Playing the loop through the filters."));
+    show_buttons();
+}
+
+/// A copy of the file rendered with the FX, beside it -- the file is never
+/// written over -- and the Slicer on it from then on, every cut where it was.
+void fx_apply_cb(lv_event_t*)
+{
+    auto* st = tools();
+    if (!st || s_file.empty() || s_fxPending) return;
+    if (!s_fx.any() && !s_fxNorm) {
+        set_text(s_fxInfo, "Nothing set -- turn PITCH or a filter, or NORMALIZE, first.");
+        return;
+    }
+    st->stopPreview();
+    s_playing = s_chopping = false;
+    crosspad::SampleFx fx = s_fx;
+    fx.keepLength = fx.semitones != 0;     // the cuts stay on the same sound
+    /* The filters and the pitch first, the level last: the copy is brought up
+     * to what it peaks at with them. */
+    bool asked;
+    if (fx.any()) {
+        asked = st->requestRendered(s_file, fx_path(s_file, fx), fx);
+        s_fxNormNext = s_fxNorm;
+    } else {
+        s_fxNormFrom = s_file;
+        asked = st->requestNormalized(s_file, norm_path(s_file), kNormPeak);
+        s_fxNormNext = false;
+    }
+    if (!asked) {
+        set_text(s_fxInfo, "The card is busy -- press APPLY again.");
+        return;
+    }
+    s_fxPending = true;
+    const std::string what = fx_summary();
+    close_overlay();
+    set_text(s_info, "");
+    busy_open(fx.any() ? "PROCESSING" : "NORMALIZING", what);
+    show_buttons();
+}
+
+/// What APPLY came to, from the tick: the copy on screen and under the
+/// pads, the slices as they were, the FX back to neutral.
+void fx_done(bool ok, const std::string& result)
+{
+    char buf[112];
+    if (!ok) {
+        s_fxNormNext = false;
+        std::snprintf(buf, sizeof(buf), "FX not applied: %s", result.c_str());
+        set_text(s_info, buf);
+        busy_end();
+        return;
+    }
+    const char* note = "";
+    if (s_fxNormNext) {
+        /* The render is on the card; the normalize is asked of it now. */
+        s_fxNormNext = false;
+        auto* st = tools();
+        s_fxNormFrom = result;
+        if (st && st->requestNormalized(result, norm_path(result), kNormPeak)) {
+            s_fxPending = true;
+            s_busyTitle = "NORMALIZING";
+            s_busyWhat = base_of(result);
+            busy_progress(0);
+            return;
+        }
+        note = " (NORMALIZE did not start: the card was busy)";
+    } else if (s_fxNorm && result == s_fxNormFrom) {
+        note = " (already at full level)";
+    }
+    s_file = result;
+    s_ov = crosspad::WaveOverview{};
+    s_loading = true;                      // the copy's length bounds the loop again
+    request_view(s_regA, s_regB);
+    fx_reset();
+    show_buttons();
+    std::snprintf(buf, sizeof(buf), "FX on: %s%s -- the slices and KIT play it.", base_of(result).c_str(), note);
+    set_text(s_info, buf);
+    busy_end();
+}
+
 bool back_handler(lv_obj_t*)
 {
     if (s_overlay) { close_overlay(); return true; }
@@ -813,7 +1190,9 @@ bool back_handler(lv_obj_t*)
         if (s_encGroup) lv_group_set_editing(s_encGroup, false);
 #endif
         if (s_editMove == Edit::Fine) request_view(s_regA, s_regB);
+        const bool moved = s_editMove != Edit::None;
         s_editParam = s_editSel = s_editMove = s_editAtk = s_editPitch = Edit::None;
+        if (moved) slices_changed();       // let go: SNAP
         show_buttons();
         show_info();
         return true;
@@ -834,7 +1213,7 @@ void take_hits()
     bool changed = false;
     for (; t != h; ++t) {
         const PadHit hit = s_hits[t % kHitQueue];
-        if (!st || s_file.empty() || s_regB <= s_regA) continue;
+        if (!st || s_file.empty() || s_regB <= s_regA || busy_working()) continue;   // the card is the job's
         if (s_mode != Mode::Free) {
             if (hit.pad < s_starts.size()) { s_sel = hit.pad; audition(hit.pad); changed = true; }
             continue;
@@ -842,8 +1221,10 @@ void take_hits()
         if (hit.pad < s_starts.size() || !s_chopping || !hit.playing) {
             const int from = hit.pad < s_starts.size() ? hit.pad : 0;
             s_sel = from;
+            /* With ATK, as its pad in the kit plays it: from a cut the loop
+             * rises over the attack instead of starting at full level. */
             s_chopping = st->previewAs(s_file, s_starts.empty() ? s_regA : s_starts[from], s_regB, false,
-                                       loop_sound());
+                                       slice_sound());
             s_playing = false;
         } else if (s_starts.size() < crosspad::SliceMath::kMaxSlices) {
             /* A cut after a lit pad restarted the loop lands between earlier
@@ -897,6 +1278,12 @@ void tick_cb(lv_timer_t*)
             }
             if (s_wave) lv_obj_invalidate(s_wave);
             show_info();
+        } else if (s_snapPending) {
+            s_snapPending = false;
+            if (job == crosspad::ToolJob::Ready && s_starts == s_snapAsked) snap_done(st->snapped());
+        } else if (s_fxPending) {
+            s_fxPending = false;
+            fx_done(job == crosspad::ToolJob::Ready, st->jobResult());
         } else if (s_listPending) {
             s_listPending = false;
             show_info();
@@ -910,18 +1297,26 @@ void tick_cb(lv_timer_t*)
             }
         } else if (s_exportPending) {
             s_exportPending = false;
+            const bool ok = job == crosspad::ToolJob::Ready;
             char buf[112];
-            std::snprintf(buf, sizeof(buf), job == crosspad::ToolJob::Ready ? "Saved the Slice kit %s -- Kits, SLICE."
-                                                                            : "Not saved: %s",
+            std::snprintf(buf, sizeof(buf),
+                          !ok ? "Not saved: %s"
+                              : (s_savePerf ? "Saved the User kit %s -- Kits, PERF." : "Saved the Slice kit %s -- Kits, SLICE."),
                           st->jobResult().c_str());
             set_text(s_info, buf);
+            busy_end();
         } else if (s_viewWanted) {
             request_view(s_wantA, s_wantB);
+        } else if (s_snapWanted) {
+            s_snapWanted = false;
+            if (s_snap && !s_file.empty() && !s_starts.empty() && !s_loading &&
+                st->requestSnapped(s_file, s_starts)) {
+                s_snapPending = true;
+                s_snapAsked = s_starts;
+            }
         }
-    } else if (s_exportPending) {
-        char buf[40];
-        std::snprintf(buf, sizeof(buf), "Writing the kit ... %u%%", (unsigned)st->jobProgress());
-        set_text(s_info, buf);
+    } else if (s_fxPending || s_exportPending) {
+        busy_progress(st->jobProgress());
     }
 
     const bool heard = st->previewing();
@@ -1006,6 +1401,67 @@ lv_obj_t* make_row(lv_obj_t* parent, int32_t h)
     return r;
 }
 
+void snap_cb(lv_event_t*)
+{
+    s_snap = !s_snap;
+    if (s_snap) slices_changed();
+    show_buttons();
+    set_text(s_info, s_snap ? "SNAP on: every cut on the zero crossing before it -- no clicks, the hit's attack kept."
+                            : "SNAP off: the cuts stay where they are put.");
+}
+
+/// @p b out of the screen's ring and into the window's.
+lv_obj_t* in_overlay(lv_obj_t* b)
+{
+#ifdef SLI_USE_ENCODER
+    lv_group_remove_obj(b);
+    if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, b);
+#endif
+    return b;
+}
+
+/// FX: the effects window over the loop.
+void fx_cb(lv_event_t*)
+{
+    if (s_overlay || busy_working() || s_fxPending || s_loading) return;
+    if (s_file.empty()) { set_text(s_info, "Pick a take first -- FX works on the loop being sliced."); return; }
+    open_overlay("FX on the sliced loop");
+    lv_obj_set_style_pad_row(s_overlay, 5, 0);
+    lv_obj_t* r1 = make_row(s_overlay, 28);
+    s_fxPitchBtn = in_overlay(make_editable(r1, 150, "", fx_pitch_cb));
+    s_fxLpBtn = in_overlay(make_editable(r1, 150, "", fx_lp_cb));
+    lv_obj_t* r2 = make_row(s_overlay, 28);
+    s_fxHpBtn = in_overlay(make_editable(r2, 150, "", fx_hp_cb));
+    s_fxNormBtn = in_overlay(make_button(r2, 150, "", fx_norm_cb));
+    for (lv_obj_t* b : {s_fxPitchBtn, s_fxLpBtn, s_fxHpBtn, s_fxNormBtn}) lv_obj_set_height(b, 28);
+
+    lv_obj_t* note = lv_label_create(s_overlay);
+    lv_obj_set_style_text_font(note, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(note, kDim, 0);
+    lv_obj_set_width(note, LV_PCT(100));
+    lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(note, "PITCH keeps the length, so every cut stays where it is; PITCH on the "
+                            "screen is still the varispeed on top. NORMALIZE brings the result up to -0.3 dB.");
+    s_fxInfo = lv_label_create(s_overlay);
+    lv_obj_set_style_text_font(s_fxInfo, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_fxInfo, kText, 0);
+    lv_obj_set_size(s_fxInfo, LV_PCT(100), 12);
+    lv_label_set_long_mode(s_fxInfo, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_fxInfo, "APPLY: a copy beside the file; the slices move onto it.");
+
+    lv_obj_t* act = make_row(s_overlay, 28);
+    in_overlay(make_button(act, 96, LV_SYMBOL_PLAY " LISTEN", fx_listen_cb));
+    lv_obj_t* apply = in_overlay(make_button(act, 96, LV_SYMBOL_OK " APPLY", fx_apply_cb));
+    lv_obj_set_style_bg_color(apply, kAccent, 0);
+    lv_obj_set_style_text_color(apply, kInk, 0);
+    in_overlay(make_button(act, 96, LV_SYMBOL_CLOSE " CLOSE", [](lv_event_t*) { close_overlay(); }));
+    for (uint32_t i = 0; i < lv_obj_get_child_count(act); ++i) lv_obj_set_height(lv_obj_get_child(act, (int32_t)i), 28);
+#ifdef SLI_USE_ENCODER
+    if (s_overlayGroup) lv_group_focus_obj(s_fxPitchBtn);
+#endif
+    show_fx();
+}
+
 } // namespace
 
 lv_obj_t* Slicer_create(lv_obj_t* parent, App* app)
@@ -1051,6 +1507,7 @@ lv_obj_t* Slicer_create(lv_obj_t* parent, App* app)
     lv_obj_set_style_pad_all(s_wave, 3, 0);
     lv_obj_remove_flag(s_wave, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_wave, wave_draw_cb, LV_EVENT_DRAW_MAIN_END, nullptr);
+    busy_build();
 
     s_info = lv_label_create(s_root);
     lv_obj_set_style_text_font(s_info, &lv_font_montserrat_10, 0);
@@ -1060,15 +1517,17 @@ lv_obj_t* Slicer_create(lv_obj_t* parent, App* app)
     lv_label_set_text(s_info, "");
 
     lv_obj_t* tools_row = make_row(s_root, 24);
-    s_selBtn = make_editable(tools_row, 50, "SEL 1", sel_cb);
-    s_moveBtn = make_editable(tools_row, 50, "MOVE", move_cb);
-    make_button(tools_row, 30, LV_SYMBOL_PLUS, add_cb);
-    make_button(tools_row, 36, "DEL", del_cb);
-    s_atkBtn = make_editable(tools_row, 54, "ATK 0", atk_cb);
+    s_selBtn = make_editable(tools_row, 40, "SEL 1", sel_cb);
+    s_moveBtn = make_editable(tools_row, 40, "MOVE", move_cb);
+    make_button(tools_row, 26, LV_SYMBOL_PLUS, add_cb);
+    make_button(tools_row, 30, "DEL", del_cb);
+    s_atkBtn = make_editable(tools_row, 46, "ATK 0", atk_cb);
+    s_snapBtn = make_button(tools_row, 36, "SNAP", snap_cb);
+    make_button(tools_row, 26, "FX", fx_cb);
     lv_obj_t* gap2 = lv_obj_create(tools_row);
     lv_obj_remove_style_all(gap2);
     lv_obj_set_flex_grow(gap2, 1);
-    make_button(tools_row, 50, LV_SYMBOL_SAVE " KIT", save_cb);
+    make_button(tools_row, 44, LV_SYMBOL_SAVE " KIT", save_cb);
 
     s_hitTail.store(s_hitHead.load());
     std::string file;
@@ -1113,13 +1572,20 @@ void Slicer_destroy(lv_obj_t* root)
         s_timer = nullptr;
     }
     if (auto* st = tools()) st->stopPreview();
+    if (s_kindDialog) ui_modal_confirm_dismiss(s_kindDialog, false);   // on the top layer: it outlives the app
 #ifdef SLI_USE_ENCODER
     if (s_overlayGroup) { lv_group_delete(s_overlayGroup); s_overlayGroup = nullptr; }
 #endif
     s_overlay = s_nameArea = nullptr;
     s_root = s_wave = s_fileBtn = s_modeBtn = s_paramBtn = s_pitchBtn = s_playBtn = s_selBtn = s_moveBtn = s_atkBtn =
-        s_info = nullptr;
-    s_playing = s_chopping = s_ovPending = s_viewWanted = s_listPending = s_exportPending = false;
+        s_snapBtn = s_info = nullptr;
+    s_snapWanted = s_snapPending = false;
+    s_playing = s_chopping = s_ovPending = s_viewWanted = s_listPending = s_exportPending = s_fxPending = false;
+    s_fxPitchBtn = s_fxLpBtn = s_fxHpBtn = s_fxNormBtn = s_fxInfo = nullptr;
+    s_editFxPitch = s_editFxLp = s_editFxHp = Edit::None;
+    s_fxNormNext = false;
+    s_busy = s_busyText = s_busyBar = nullptr;
+    s_busyOn = false;
     s_editParam = s_editSel = s_editMove = s_editAtk = s_editPitch = Edit::None;
     s_headX = -1;
 
