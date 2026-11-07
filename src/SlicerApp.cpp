@@ -8,7 +8,7 @@
  *          turntable -- PLAY, the pads and the kit all hear it), and PLAY
  *          (the whole loop, round and round)
  *   wave   the loop, the slices in turn light and dark, the selected one
- *          brightest, each numbered at its start -- the MPC's view
+ *          brightest, each numbered at its start
  *   tools  SEL picks a slice (turned; each one is heard as it is reached),
  *          MOVE moves its start (a column per detent, then a millisecond with
  *          the picture zoomed in), + splits it, DEL joins it to the one
