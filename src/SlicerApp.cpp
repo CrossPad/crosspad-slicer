@@ -55,6 +55,7 @@
 #include "crosspad/sampletools/ISampleTools.hpp"
 #include "crosspad/sampletools/SampleFx.hpp"
 #include "crosspad/sampletools/SliceMath.hpp"
+#include "crosspad-gui/components/touch_gesture.h"
 #include "crosspad-gui/components/ui_modal.h"
 #include "crosspad-gui/widgets/gui_helpers.h"
 
@@ -82,6 +83,7 @@ namespace {
 constexpr uint16_t kCols       = 300;
 constexpr uint32_t kTickMs     = 40;
 constexpr uint32_t kZoomFrames = 12000;
+constexpr uint32_t kFastFactor = 10;      // a MOVE detent with FAST held
 constexpr int      kPads       = 16;
 constexpr float    kNormPeak   = 0.966f;  // NORMALIZE's loudest sample: -0.3 dB, as the Sampler's NORM
 
@@ -141,6 +143,8 @@ lv_obj_t* s_pitchBtn = nullptr;
 lv_obj_t* s_playBtn = nullptr;
 lv_obj_t* s_selBtn = nullptr;
 lv_obj_t* s_moveBtn = nullptr;
+lv_obj_t* s_top = nullptr;      // the row above the picture, while MOVE is not turned
+lv_obj_t* s_fastBtn = nullptr;  // in its place while it is: held, x kFastFactor
 lv_obj_t* s_atkBtn = nullptr;
 lv_obj_t* s_snapBtn = nullptr;
 lv_obj_t* s_info = nullptr;
@@ -279,6 +283,42 @@ void fill(lv_layer_t* layer, int32_t x1, int32_t y1, int32_t x2, int32_t y2, lv_
     lv_draw_rect(layer, &d, &a);
 }
 
+/// A finger on the picture while MOVE is FINE (zoomed in) scrolls it: the
+/// frames under the finger stay under it, the slices where they are. Each
+/// position asks for its picture; one asked for while another is read
+/// replaces it (request_view()).
+uint32_t s_dragFrom = 0, s_dragLen = 0, s_dragAsked = 0;
+int32_t  s_dragX = 0;
+bool     s_dragging = false;
+
+void wave_drag_cb(lv_event_t* e)
+{
+    const lv_event_code_t code = lv_event_get_code(e);
+    lv_indev_t* indev = lv_indev_active();
+    if (!indev || !s_wave) return;
+    lv_point_t pt;
+    lv_indev_get_point(indev, &pt);
+    if (code == LV_EVENT_PRESSED) {
+        const uint32_t len = s_ov.end > s_ov.start ? s_ov.end - s_ov.start : 0;
+        s_dragging = s_editMove == Edit::Fine && len && len < s_ov.frames;
+        s_dragFrom = s_dragAsked = s_ov.start;
+        s_dragLen = len;
+        s_dragX = pt.x;
+        return;
+    }
+    if (code != LV_EVENT_PRESSING) { s_dragging = false; return; }
+    if (!s_dragging) return;
+    lv_area_t box;
+    lv_obj_get_content_coords(s_wave, &box);
+    const int32_t w = std::max<int32_t>(1, lv_area_get_width(&box));
+    int64_t a = (int64_t)s_dragFrom - (int64_t)(pt.x - s_dragX) * (int64_t)s_dragLen / w;
+    a = std::max<int64_t>(0, std::min<int64_t>((int64_t)(s_ov.frames - s_dragLen), a));
+    const uint32_t col = std::max<uint32_t>(1, s_dragLen / kCols);
+    if ((uint32_t)std::llabs(a - (int64_t)s_dragAsked) < col) return;
+    s_dragAsked = (uint32_t)a;
+    request_view(s_dragAsked, s_dragAsked + s_dragLen);
+}
+
 void wave_draw_cb(lv_event_t* e)
 {
     lv_layer_t* layer = lv_event_get_layer(e);
@@ -367,6 +407,11 @@ void show_info();
 
 void show_buttons()
 {
+    if (s_top && s_fastBtn) {
+        const bool turning = s_editMove != Edit::None;
+        if (turning) { lv_obj_add_flag(s_top, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(s_fastBtn, LV_OBJ_FLAG_HIDDEN); }
+        else         { lv_obj_add_flag(s_fastBtn, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(s_top, LV_OBJ_FLAG_HIDDEN); }
+    }
     static const char* kModes[] = {"HITS", "EQUAL", "FREE"};
     set_text(lv_obj_get_child(s_modeBtn, 0), kModes[(int)s_mode]);
     char buf[20];
@@ -520,6 +565,10 @@ bool edit_event(lv_event_t* e, Edit& edit, bool twoStage)
     lv_group_t* g = lv_obj_get_group(b);
     const lv_event_code_t code = lv_event_get_code(e);
     if (code == LV_EVENT_FOCUSED) {
+        /* A finger's press focuses the button first, which ends editing on
+         * the way; its CLICKED comes next and decides. */
+        lv_indev_t* in = lv_indev_active();
+        if (in && lv_indev_get_type(in) == LV_INDEV_TYPE_POINTER) return true;
         const bool editing = g && lv_group_get_editing(g);
         if (editing && edit == Edit::None) edit = Edit::Coarse;
         else if (!editing) edit = Edit::None;
@@ -528,6 +577,7 @@ bool edit_event(lv_event_t* e, Edit& edit, bool twoStage)
     if (code != LV_EVENT_CLICKED) return false;
     if (edit == Edit::Coarse && twoStage) {
         edit = Edit::Fine;
+        if (g) lv_group_set_editing(g, true);
     } else if (edit != Edit::None) {
         edit = Edit::None;
         if (g) lv_group_set_editing(g, false);
@@ -576,8 +626,10 @@ void move_cb(lv_event_t* e)
     const int d = turn(e);
     if (!d || s_editMove == Edit::None || s_starts.empty()) return;
     const uint32_t viewLen = s_ov.end > s_ov.start ? s_ov.end - s_ov.start : 1;
-    const uint32_t step = s_editMove == Edit::Coarse ? std::max<uint32_t>(1, viewLen / kCols)
-                                                     : std::max<uint32_t>(1, s_rate / 1000);
+    const bool fast = s_fastBtn && lv_obj_has_state(s_fastBtn, LV_STATE_PRESSED);
+    const uint32_t step = (s_editMove == Edit::Coarse ? std::max<uint32_t>(1, viewLen / kCols)
+                                                      : std::max<uint32_t>(1, s_rate / 1000)) *
+                          (fast ? kFastFactor : 1);
     /* Between its neighbours, a slice's worth from each; the first slice's
      * start trims the loop's front. */
     const int64_t lo = s_sel > 0 ? (int64_t)s_starts[s_sel - 1] + min_gap() : 0;
@@ -1496,6 +1548,21 @@ lv_obj_t* Slicer_create(lv_obj_t* parent, App* app)
     lv_obj_remove_style_all(gap);
     lv_obj_set_flex_grow(gap, 1);
     s_playBtn = make_button(top, 36, LV_SYMBOL_PLAY, play_cb);
+    s_top = top;
+    /* Not in the encoder's group: a finger on it leaves MOVE being turned. */
+    s_fastBtn = lv_button_create(s_root);
+    lv_obj_set_size(s_fastBtn, LV_PCT(100), 22);
+    lv_obj_set_style_pad_all(s_fastBtn, 0, 0);
+    lv_obj_set_style_radius(s_fastBtn, 6, 0);
+    lv_obj_set_style_shadow_width(s_fastBtn, 0, 0);
+    lv_obj_set_style_bg_color(s_fastBtn, kPanel, 0);
+    lv_obj_set_style_bg_color(s_fastBtn, kAccent, LV_STATE_PRESSED);
+    lv_obj_t* fastLabel = lv_label_create(s_fastBtn);
+    lv_obj_set_style_text_font(fastLabel, &lv_font_montserrat_10, 0);
+    lv_label_set_text(fastLabel, LV_SYMBOL_RIGHT LV_SYMBOL_RIGHT "  FAST x10 -- hold");
+    lv_obj_center(fastLabel);
+    if (lv_obj_get_group(s_fastBtn)) lv_group_remove_obj(s_fastBtn);
+    lv_obj_add_flag(s_fastBtn, LV_OBJ_FLAG_HIDDEN);
 
     s_wave = lv_obj_create(s_root);
     lv_obj_remove_style_all(s_wave);
@@ -1507,6 +1574,11 @@ lv_obj_t* Slicer_create(lv_obj_t* parent, App* app)
     lv_obj_set_style_pad_all(s_wave, 3, 0);
     lv_obj_remove_flag(s_wave, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_wave, wave_draw_cb, LV_EVENT_DRAW_MAIN_END, nullptr);
+    lv_obj_add_event_cb(s_wave, wave_drag_cb, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(s_wave, wave_drag_cb, LV_EVENT_PRESSING, nullptr);
+    lv_obj_add_event_cb(s_wave, wave_drag_cb, LV_EVENT_RELEASED, nullptr);
+    lv_obj_add_event_cb(s_wave, wave_drag_cb, LV_EVENT_PRESS_LOST, nullptr);
+    lv_obj_add_flag(s_wave, crosspad_gui::kDragsHorizontal);   // not a back swipe
     busy_build();
 
     s_info = lv_label_create(s_root);
@@ -1578,7 +1650,8 @@ void Slicer_destroy(lv_obj_t* root)
 #endif
     s_overlay = s_nameArea = nullptr;
     s_root = s_wave = s_fileBtn = s_modeBtn = s_paramBtn = s_pitchBtn = s_playBtn = s_selBtn = s_moveBtn = s_atkBtn =
-        s_snapBtn = s_info = nullptr;
+        s_snapBtn = s_info = s_top = s_fastBtn = nullptr;
+    s_dragging = false;
     s_snapWanted = s_snapPending = false;
     s_playing = s_chopping = s_ovPending = s_viewWanted = s_listPending = s_exportPending = s_fxPending = false;
     s_fxPitchBtn = s_fxLpBtn = s_fxHpBtn = s_fxNormBtn = s_fxInfo = nullptr;
