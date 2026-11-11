@@ -168,6 +168,9 @@ crosspad::WaveOverview s_ov;             // the picture drawn: the loop, or a zo
 std::vector<uint8_t> s_env;              // the loop's envelope, for HITS
 uint32_t s_envHop = 0, s_envStart = 0;
 bool     s_loading = false;
+/* Why the loop on screen could not be read (the tools take 16-bit PCM WAV
+ * only): said instead of the slices, until another take is picked. */
+std::string s_loadError;
 bool     s_ovPending = false, s_viewWanted = false;
 uint32_t s_wantA = 0, s_wantB = 0;
 bool     s_listPending = false, s_exportPending = false;
@@ -469,7 +472,7 @@ void snap_done(const std::vector<uint32_t>& snapped)
 /// The mode's own slices, from what is known of the loop.
 void recompute()
 {
-    if (s_regB <= s_regA) return;
+    if (s_regB <= s_regA || !s_loadError.empty()) return;
     if (s_mode == Mode::Hits && !s_env.empty()) {
         s_starts = crosspad::SliceMath::onsets(s_env, s_envHop, s_envStart, s_regA, s_regB, s_sens, s_rate / 20);
     } else if (s_mode == Mode::Equal) {
@@ -492,6 +495,7 @@ void load(const std::string& file, uint32_t a, uint32_t b)
     s_sel = 0;
     s_ov = crosspad::WaveOverview{};
     s_loading = true;
+    s_loadError.clear();
     request_view(a, b);
     show_buttons();
     show_info();
@@ -531,6 +535,13 @@ void show_info()
         std::snprintf(buf, sizeof(buf), "Pick a take -- or record one in the Recorder and press SLICE there.");
     } else if (s_loading) {
         std::snprintf(buf, sizeof(buf), "Reading %s ...", base_of(s_file).c_str());
+    } else if (!s_loadError.empty()) {
+        const bool unreadable = s_loadError.rfind("cannot read", 0) == 0;
+        std::snprintf(buf, sizeof(buf), "Not opened: %s%s", s_loadError.c_str(),
+                      unreadable ? " -- 16-bit WAV only." : "");
+    } else if (s_starts.empty()) {
+        /* Nothing sliced yet (the picture is still to come): no slice to name. */
+        std::snprintf(buf, sizeof(buf), "%s", base_of(s_file).c_str());
     } else if (s_mode == Mode::Free && s_starts.size() <= 1 && !s_chopping) {
         std::snprintf(buf, sizeof(buf), "FREE: hit a pad -- the loop plays -- then hit pads to cut it.");
     } else if (s_editPitch != Edit::None) {
@@ -692,7 +703,7 @@ void mode_cb(lv_event_t*)
 void play_cb(lv_event_t*)
 {
     auto* st = tools();
-    if (!st || s_file.empty()) return;
+    if (!st || s_file.empty() || !s_loadError.empty()) return;
     if (s_playing || s_chopping) { st->stopPreview(); s_playing = s_chopping = false; }
     else s_playing = st->previewAs(s_file, s_regA, s_regB, true, loop_sound());
     show_buttons();
@@ -1225,6 +1236,7 @@ void fx_done(bool ok, const std::string& result)
     s_file = result;
     s_ov = crosspad::WaveOverview{};
     s_loading = true;                      // the copy's length bounds the loop again
+    s_loadError.clear();
     request_view(s_regA, s_regB);
     fx_reset();
     show_buttons();
@@ -1265,7 +1277,7 @@ void take_hits()
     bool changed = false;
     for (; t != h; ++t) {
         const PadHit hit = s_hits[t % kHitQueue];
-        if (!st || s_file.empty() || s_regB <= s_regA || busy_working()) continue;   // the card is the job's
+        if (!st || s_file.empty() || !s_loadError.empty() || s_regB <= s_regA || busy_working()) continue;   // the card is the job's
         if (s_mode != Mode::Free) {
             if (hit.pad < s_starts.size()) { s_sel = hit.pad; audition(hit.pad); changed = true; }
             continue;
@@ -1303,6 +1315,7 @@ void tick_cb(lv_timer_t*)
     if (job != crosspad::ToolJob::Busy) {
         if (s_ovPending) {
             s_ovPending = false;
+            std::string failed;
             if (job == crosspad::ToolJob::Ready) {
                 crosspad::WaveOverview ov = st->overview();
                 if (ov.file == s_file) {
@@ -1324,12 +1337,18 @@ void tick_cb(lv_timer_t*)
                     }
                     s_ov = std::move(ov);
                 }
-            } else {
+            } else if (s_loading) {
+                /* The loop itself is unreadable (24-bit, float, not a WAV):
+                 * no slices are made of it, and the screen says why. */
                 s_loading = false;
-                set_text(s_info, st->jobResult().c_str());
+                s_loadError = st->jobResult();
+                if (s_loadError.empty()) s_loadError = "cannot read " + base_of(s_file);
+            } else {
+                failed = st->jobResult();          // a zoom: the slices stay, the reason is shown
             }
             if (s_wave) lv_obj_invalidate(s_wave);
             show_info();
+            if (!failed.empty()) set_text(s_info, failed.c_str());
         } else if (s_snapPending) {
             s_snapPending = false;
             if (job == crosspad::ToolJob::Ready && s_starts == s_snapAsked) snap_done(st->snapped());
@@ -1608,6 +1627,7 @@ lv_obj_t* Slicer_create(lv_obj_t* parent, App* app)
         load(file, a, b);
     } else if (!s_file.empty()) {
         s_loading = true;                   // back to the loop left last time
+        s_loadError.clear();
         request_view(s_regA, s_regB);
     }
     show_buttons();
